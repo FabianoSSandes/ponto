@@ -1,0 +1,385 @@
+assistente-ponto/
+├── README.md             # As instruções que você está lendo
+├── package.json          # Lista de "ingredientes" do projeto
+├── server.js             # O cérebro do assistente (lógica e horários)
+├── .env.example          # Exemplo das variáveis de ambiente
+└── public/
+    ├── index.html        # A página web que o usuário vê
+    ├── style.css         # O design da página web
+    └── app.js            # A interatividade dos botões na página
+└── data/
+    └── db.json           # Onde os registros de ponto ficam salvos (começa vazio)
+
+{
+  "name": "assistente-ponto-facil",
+  "version": "1.0.0",
+  "description": "Um assistente de ponto com lembretes via WhatsApp e interface web.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const cron = require('node-cron');
+const bodyParser = require('body-parser');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// --- CONFIGURAÇÃO ---
+const TIMEZONE = process.env.TZ || 'America/Sao_Paulo';
+const USER_MSISDN = process.env.USER_MSISDN; // Ex: 5511999999999
+const APP_TOKEN = process.env.APP_TOKEN || 'senha-super-secreta';
+
+// (Opcional) Tokens para a API real do WhatsApp
+const WHATSAPP_CLOUD_TOKEN = process.env.WHATSAPP_CLOUD_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+const dbPath = path.join(__dirname, 'data', 'db.json');
+
+// Garante que o diretório e o arquivo de dados existam
+if (!fs.existsSync(path.join(__dirname, 'data'))) {
+  fs.mkdirSync(path.join(__dirname, 'data'));
+}
+if (!fs.existsSync(dbPath)) {
+  fs.writeFileSync(dbPath, JSON.stringify([]));
+}
+
+// --- MIDDLEWARE (FERRAMENTAS) ---
+app.use(express.static('public'));
+app.use(bodyParser.json());
+
+// Middleware simples de segurança com token
+const checkToken = (req, res, next) => {
+  const token = req.headers['x-app-token'];
+  if (token !== APP_TOKEN) {
+    return res.status(401).send('Acesso não autorizado.');
+  }
+  next();
+};
+
+
+// --- FUNÇÕES PRINCIPAIS ---
+
+// Função para enviar notificação (simulada ou real)
+function sendWhatsAppMessage(message) {
+  console.log(`[Mensagem para ${USER_MSISDN}]: ${message}`);
+
+  if (!WHATSAPP_CLOUD_TOKEN || !WHATSAPP_PHONE_NUMBER_ID || !USER_MSISDN) {
+    console.log('[WA-OFF] Tokens do WhatsApp não configurados. Usando apenas logs.');
+    return;
+  }
+  
+  // Aqui entraria a lógica real para enviar a mensagem pela API do WhatsApp
+  // Ex: fetch(`https://graph.facebook.com/v19.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`, { ... });
+  console.log('[WA-ON] Enviando notificação real...');
+}
+
+// Função para salvar um registro de ponto
+function saveRecord(eventType) {
+  const records = JSON.parse(fs.readFileSync(dbPath));
+  const newRecord = {
+    id: Date.now(),
+    event: eventType,
+    timestamp: new Date().toISOString()
+  };
+  records.push(newRecord);
+  fs.writeFileSync(dbPath, JSON.stringify(records, null, 2));
+  console.log(`Registro salvo: ${eventType}`);
+  return newRecord;
+}
+
+
+// --- AGENDADOR DE TAREFAS (CRON) ---
+// Horários de Segunda a Sexta, no fuso horário definido
+
+// 08:00 - Lembrete de Entrada (IN)
+cron.schedule('0 8 * * 1-5', () => {
+  const message = '[Assistente de Ponto] Bom dia! Hora de marcar sua entrada (IN). Não se esqueça!';
+  sendWhatsAppMessage(message);
+}, { scheduled: true, timezone: TIMEZONE });
+
+// 12:00 - Lembrete Início do almoço (LUNCH_START)
+cron.schedule('0 12 * * 1-5', () => {
+  const message = '[Assistente de Ponto] Pausa para o almoço! Marque seu LUNCH_START.';
+  sendWhatsAppMessage(message);
+}, { scheduled: true, timezone: TIMEZONE });
+
+// 13:00 - Lembrete Fim do almoço (LUNCH_END)
+cron.schedule('0 13 * * 1-5', () => {
+  const message = '[Assistente de Ponto] Fim do almoço! Hora de marcar LUNCH_END e voltar ao trabalho.';
+  sendWhatsAppMessage(message);
+}, { scheduled: true, timezone: TIMEZONE });
+
+// 17:00 - Lembrete Saída (OUT)
+cron.schedule('0 17 * * 1-5', () => {
+  const message = '[Assistente de Ponto] Expediente encerrado! Marque sua saída (OUT). Tenha um ótimo descanso!';
+  sendWhatsAppMessage(message);
+}, { scheduled: true, timezone: TIMEZONE });
+
+
+// --- API (PONTOS DE ACESSO PARA A PÁGINA WEB) ---
+
+// Rota para registrar um ponto manualmente (usado pelos botões)
+app.post('/api/record', checkToken, (req, res) => {
+  const { event } = req.body;
+  const validEvents = ['IN', 'LUNCH_START', 'LUNCH_END', 'OUT'];
+  if (!validEvents.includes(event)) {
+    return res.status(400).send('Evento inválido.');
+  }
+  const record = saveRecord(event);
+  res.status(201).json(record);
+});
+
+// Rota para buscar os registros de hoje
+app.get('/api/records/today', checkToken, (req, res) => {
+  const records = JSON.parse(fs.readFileSync(dbPath));
+  const today = new Date().toISOString().slice(0, 10);
+  
+  const todayRecords = records.filter(r => r.timestamp.startsWith(today));
+  res.json(todayRecords);
+});
+
+
+// --- INICIAR O SERVIDOR ---
+app.listen(PORT, () => {
+  console.log(`Servidor rodando em http://localhost:${PORT}`);
+  console.log(`Fuso horário configurado: ${TIMEZONE}`);
+});
+# --- Configurações Gerais ---
+# Porta em que o servidor vai rodar
+PORT=3000
+# Fuso Horário para os lembretes (ex: America/Sao_Paulo, America/Bahia)
+TZ=America/Sao_Paulo
+# Senha simples para proteger o acesso à sua página web
+APP_TOKEN=mude-para-uma-senha-facil
+
+# --- Configurações do WhatsApp ---
+# Seu número de celular com código do país (ex: 5511999999999)
+USER_MSISDN=
+
+# (OPCIONAL AVANÇADO) - Deixe em branco para não enviar mensagens reais
+# Cole aqui o Token gerado na Meta for Developers
+WHATSAPP_CLOUD_TOKEN=
+# Cole aqui o ID do Número de Telefone da Meta for Developers
+WHATSAPP_PHONE_NUMBER_ID=
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assistente de Ponto</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="shortcut icon" href="https://upload.wikimedia.org/wikipedia/commons/8/8c/Clocks-icon.svg" type="image/x-icon">
+</head>
+<body>
+    <header>
+        <img src="https://upload.wikimedia.org/wikipedia/commons/8/8c/Clocks-icon.svg" alt="Ícone de Relógio">
+        <h1>Assistente de Ponto</h1>
+        <p>Marque seus horários de forma fácil.</p>
+    </header>
+
+    <main>
+        <div class="actions">
+            <button id="btn-in">✔️ Marcar Entrada</button>
+            <button id="btn-lunch-start">🥪 Sair para Almoço</button>
+            <button id="btn-lunch-end"> वापस काम पर लौटें </button> <!-- "De volta ao trabalho" em hindi, como exemplo de personalização -->
+            <button id="btn-out">🚪 Marcar Saída</button>
+        </div>
+
+        <div class="records">
+            <h2>Registros de Hoje</h2>
+            <ul id="records-list">
+                <!-- Os registros aparecerão aqui -->
+            </ul>
+        </div>
+    </main>
+
+    <footer>
+        <p>Projeto de código aberto</p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    background-color: #f0f2f5;
+    color: #333;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+}
+
+header {
+    text-align: center;
+    padding: 20px;
+    background-color: #fff;
+    width: 100%;
+    border-bottom: 1px solid #ddd;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+header img {
+    width: 50px;
+    height: 50px;
+}
+
+main {
+    width: 90%;
+    max-width: 600px;
+    margin: 20px 0;
+}
+
+.actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-bottom: 30px;
+}
+
+.actions button {
+    padding: 20px;
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    border-radius: 10px;
+    border: none;
+    background-color: #007bff;
+    color: white;
+    transition: transform 0.2s;
+}
+
+.actions button:hover {
+    transform: scale(1.05);
+}
+
+.actions button#btn-in { background-color: #28a745; }
+.actions button#btn-lunch-start { background-color: #ffc107; color: #333; }
+.actions button#btn-lunch-end { background-color: #17a2b8; }
+.actions button#btn-out { background-color: #dc3545; }
+
+.records {
+    background-color: #fff;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+#records-list {
+    list-style: none;
+    padding: 0;
+}
+
+#records-list li {
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    justify-content: space-between;
+}
+
+#records-list li:last-child {
+    border-bottom: none;
+}
+
+footer {
+    margin-top: auto;
+    padding: 15px;
+    font-size: 0.8em;
+    color: #888;
+}```
+
+**6. `public/app.js` (A Mágica dos Botões)**
+```javascript
+document.addEventListener('DOMContentLoaded', () => {
+    const appToken = prompt("Por favor, digite sua senha de acesso (APP_TOKEN):");
+    if (!appToken) {
+        document.body.innerHTML = '<h1>Acesso negado. Senha necessária.</h1>';
+        return;
+    }
+
+    // Armazena o token para uso nas requisições
+    sessionStorage.setItem('appToken', appToken);
+    
+    const apiHeaders = {
+        'Content-Type': 'application/json',
+        'x-app-token': sessionStorage.getItem('appToken')
+    };
+
+    const btnIn = document.getElementById('btn-in');
+    const btnLunchStart = document.getElementById('btn-lunch-start');
+    const btnLunchEnd = document.getElementById('btn-lunch-end');
+    const btnOut = document.getElementById('btn-out');
+    const recordsList = document.getElementById('records-list');
+
+    // Função para buscar e mostrar os registros
+    async function fetchAndDisplayRecords() {
+        try {
+            const response = await fetch('/api/records/today', { headers: apiHeaders });
+            if (!response.ok) {
+                if (response.status === 401) alert('Senha incorreta!');
+                throw new Error('Falha ao buscar registros.');
+            }
+            const records = await response.json();
+            
+            recordsList.innerHTML = ''; // Limpa a lista antes de adicionar os novos
+            if (records.length === 0) {
+                recordsList.innerHTML = '<li>Nenhum registro hoje.</li>';
+            } else {
+                records.forEach(record => {
+                    const listItem = document.createElement('li');
+                    const eventName = record.event.replace('_', ' ').toLowerCase();
+                    const eventTime = new Date(record.timestamp).toLocaleTimeString('pt-BR');
+                    listItem.innerHTML = `<span>${eventName.charAt(0).toUpperCase() + eventName.slice(1)}</span> <strong>${eventTime}</strong>`;
+                    recordsList.appendChild(listItem);
+                });
+            }
+        } catch (error) {
+            console.error(error.message);
+        }
+    }
+
+    // Função para registrar um evento
+    async function recordEvent(event) {
+        try {
+            const response = await fetch('/api/record', {
+                method: 'POST',
+                headers: apiHeaders,
+                body: JSON.stringify({ event: event })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Falha ao registrar ${event}`);
+            }
+            
+            // Atualiza a lista na tela
+            fetchAndDisplayRecords();
+
+        } catch (error) {
+            console.error(error.message);
+            alert('Ocorreu um erro. Verifique o console.');
+        }
+    }
+
+    // Adiciona os "escutadores" de clique nos botões
+    btnIn.addEventListener('click', () => recordEvent('IN'));
+    btnLunchStart.addEventListener('click', () => recordEvent('LUNCH_START'));
+    btnLunchEnd.addEventListener('click', () => recordEvent('LUNCH_END'));
+    btnOut.addEventListener('click', () => recordEvent('OUT'));
+
+    // Carrega os registros do dia ao abrir a página
+    fetchAndDisplayRecords();
+});
